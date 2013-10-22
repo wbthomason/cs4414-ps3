@@ -122,17 +122,18 @@ fn main() {
                 else {
                     // Fun scheduling happens here!
                         // how do I get access to the value borrowed here
+                        unsafe {
                     match stream {
                         Some(ref s) => { 
-                                let mut stream = s;
+                                let mut stream = cast::transmute_mut(s);
                                 match stream.peer_name() {
-                                    Some(pn) => { println(fmt!("%?", pn.to_str()));},
+                                    Some(pn) => { println(fmt!("Peer is:%?", pn.to_str()));},
                                     None     => fail!()
                                 }
                         },
                         None    => fail!()
                     };
-        
+        }
                     let msg: sched_msg = sched_msg{stream: stream, filepath: file_path.clone()};
                     child_chan.send(msg);
                     
