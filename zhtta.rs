@@ -21,6 +21,8 @@ use std::cell::Cell;
 use std::{os, str, io};
 use extra::arc;
 use std::comm::*;
+use std::cast;
+use std::option::Option;
 
 static PORT:    int = 4414;
 static IPV4_LOOPBACK: &'static str = "127.0.0.1";
@@ -39,6 +41,7 @@ fn main() {
     let (port, chan) = stream();
     let chan = SharedChan::new(chan);
     
+    // FILO SCHEDULING done by port
     // add file requests into queue.
     do spawn {
         while(true) {
@@ -49,6 +52,7 @@ fn main() {
             }
         }
     }
+
     
     // take file requests from queue, and send a response.
     do spawn {
@@ -81,8 +85,8 @@ fn main() {
         let stream = Cell::new(stream);
         
         let incr_count = shared_count.clone();
-        // Start a new task to handle the connection
         let child_chan = chan.clone();
+        // Start a new task to handle the connection
         do spawn {
             do incr_count.write |count| {
                 *count = *count + 1;
@@ -116,7 +120,19 @@ fn main() {
                     stream.write(response.as_bytes());
                 }
                 else {
-                    // may do scheduling here
+                    // Fun scheduling happens here!
+                        // how do I get access to the value borrowed here
+                    match stream {
+                        Some(ref s) => { 
+                                let mut stream = s;
+                                match stream.peer_name() {
+                                    Some(pn) => { println(fmt!("%?", pn.to_str()));},
+                                    None     => fail!()
+                                }
+                        },
+                        None    => fail!()
+                    };
+        
                     let msg: sched_msg = sched_msg{stream: stream, filepath: file_path.clone()};
                     child_chan.send(msg);
                     
