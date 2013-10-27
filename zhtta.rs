@@ -20,23 +20,33 @@ use std::io::println;
 use std::cell::Cell;
 use std::{os, str, io};
 use extra::arc;
+use extra::priority_queue::PriorityQueue;
 use std::comm::*;
 use std::cast;
 use std::option::Option;
+use std::hashmap::HashSet;
 
 static PORT:    int = 4414;
 static IPV4_LOOPBACK: &'static str = "127.0.0.1";
 
 struct sched_msg {
     stream: Option<std::rt::io::net::tcp::TcpStream>,
-    filepath: ~std::path::PosixPath
+    filepath: ~std::path::PosixPath,
+    priority: uint
 }
 
+impl std::cmp::Ord for sched_msg {
+    fn lt(&self, other: &sched_msg) -> bool {
+        return self.priority > other.priority;
+    }
+}
+
+
 fn main() {
-    let req_vec: ~[sched_msg] = ~[];
-    let shared_req_vec = arc::RWArc::new(req_vec);
-    let add_vec = shared_req_vec.clone();
-    let take_vec = shared_req_vec.clone();
+    let req_heap: PriorityQueue<sched_msg> = PriorityQueue::new();
+    let shared_req_heap = arc::RWArc::new(req_heap);
+    let add_vec = shared_req_heap.clone();
+    let take_vec = shared_req_heap.clone();
     
     let (port, chan) = stream();
     let chan = SharedChan::new(chan);
@@ -59,7 +69,6 @@ fn main() {
         while(true) {
             do take_vec.write |vec| {
                 let mut tf = (*vec).pop();
-                
                 match io::read_whole_file(tf.filepath) {
                     Ok(file_data) => {
                         tf.stream.write(file_data);
@@ -72,6 +81,14 @@ fn main() {
         }
     }
     
+    // IP addresses to give higher priority
+    let mut ip_vals: HashSet<u32> = HashSet::with_capacity(20);
+    ip_vals.insert((192 as u32 << 24) + (168 as u32 << 16));
+    ip_vals.insert((127 as u32 << 24) + (143 as u32 << 16));
+    ip_vals.insert((137 as u32 << 24) + (54 as u32 << 16));
+    ip_vals.insert(0);
+    let shared_ip_map = arc::RWArc::new(ip_vals);
+
     let shared_count = arc::RWArc::new(0);
 
     let socket = net::tcp::TcpListener::bind(SocketAddr {ip: Ipv4Addr(0,0,0,0), port: PORT as u16});
@@ -86,6 +103,7 @@ fn main() {
         
         let incr_count = shared_count.clone();
         let child_chan = chan.clone();
+        let shared_ip_map = shared_ip_map.clone();
         // Start a new task to handle the connection
         do spawn {
             do incr_count.write |count| {
@@ -121,20 +139,31 @@ fn main() {
                 }
                 else {
                     // Fun scheduling happens here!
-                        // how do I get access to the value borrowed here
-                        unsafe {
-                    match stream {
-                        Some(ref s) => { 
-                                let mut stream = cast::transmute_mut(s);
-                                match stream.peer_name() {
-                                    Some(pn) => { println(fmt!("Peer is:%?", pn.to_str()));},
-                                    None     => fail!()
-                                }
-                        },
-                        None    => fail!()
-                    };
-        }
-                    let msg: sched_msg = sched_msg{stream: stream, filepath: file_path.clone()};
+                    let mut priority = 10;
+                    
+                    unsafe {
+                        match stream {
+                            Some(ref s) => { 
+                                    let stream = cast::transmute_mut(s);
+                                    let pn = stream.peer_name().unwrap();
+                                    println(fmt!("Peer is: %?", pn));
+                                    match pn.ip {
+                                        Ipv4Addr(a, b, c, d) => {   
+                                                                // Since we are sharing the ip_map it must be read
+                                                                do shared_ip_map.read |map| {
+                                                                    if check_ip(a,b,c,d, map) {
+                                                                        priority = 1;
+                                                                        println("higher priority!");
+                                                                    }
+                                                                }
+                                                            },
+                                        _                    =>  fail!()
+                                    }
+                            },
+                            _    => fail!()
+                        };
+                    }
+                    let msg: sched_msg = sched_msg{stream: stream, filepath: file_path.clone(), priority: priority};
                     child_chan.send(msg);
                     
                     println(fmt!("get file request: %?", file_path));
@@ -143,4 +172,25 @@ fn main() {
             println!("connection terminates")
         }
     }
+}
+
+// Looks up an ip prefix in the hashset by trying each octet
+fn check_ip(a: u8, b: u8, c: u8, d: u8, map: &HashSet<u32>) -> bool {
+    let mut mut_ip = a as u32 << 24;  
+    if map.contains(&mut_ip) {
+        return true;
+    }
+    mut_ip += (b as u32 << 16);
+    if map.contains(&mut_ip) {
+        return true;
+    }
+    mut_ip += (c as u32 << 8);
+    if map.contains(&mut_ip) {
+        return true;
+    }
+    mut_ip += (d as u32);
+    if map.contains(&mut_ip) {
+        return true;
+    }
+    false
 }
