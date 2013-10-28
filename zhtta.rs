@@ -25,6 +25,7 @@ use std::comm::*;
 use std::cast;
 use std::option::Option;
 use std::hashmap::HashSet;
+use std::path::Path;
 
 static PORT:    int = 4414;
 static IPV4_LOOPBACK: &'static str = "127.0.0.1";
@@ -69,6 +70,7 @@ fn main() {
         while(true) {
             do take_vec.write |vec| {
                 let mut tf = (*vec).pop();
+                // need a better way to write THIS is Slow!
                 match io::read_whole_file(tf.filepath) {
                     Ok(file_data) => {
                         tf.stream.write(file_data);
@@ -82,7 +84,7 @@ fn main() {
     }
     
     // IP addresses to give higher priority
-    let mut ip_vals: HashSet<u32> = HashSet::with_capacity(20);
+    let mut ip_vals: HashSet<u32> = HashSet::with_capacity(9000);
     ip_vals.insert((192 as u32 << 24) + (168 as u32 << 16));
     ip_vals.insert((127 as u32 << 24) + (143 as u32 << 16));
     ip_vals.insert((137 as u32 << 24) + (54 as u32 << 16));
@@ -119,8 +121,13 @@ fn main() {
             if req_group.len() > 2 {
                 let path = req_group[1];
                 println(fmt!("Request for path: \n%?", path));
-                
-                let file_path = ~os::getcwd().push(path.replace("/../", ""));
+                // More better path security!
+                let unclean_path = os::getcwd().push(Path(path).to_str()).to_str();
+                let mut file_path = ~os::getcwd();
+                // paths are always normalized so a/b/../c becomes a/c
+                if unclean_path.starts_with(file_path.to_str()) {
+                    file_path = ~file_path.push(path);
+                }
                 if !os::path_exists(file_path) || os::path_is_dir(file_path) {
                     println(fmt!("Request received:\n%s", request_str));
                     let response: ~str = fmt!(
@@ -139,8 +146,7 @@ fn main() {
                 }
                 else {
                     // Fun scheduling happens here!
-                    let mut priority = 10;
-                    
+                    let mut priority = file_path.stat().unwrap().st_size as uint;
                     unsafe {
                         match stream {
                             Some(ref s) => { 
@@ -153,7 +159,7 @@ fn main() {
                                                                 do shared_ip_map.read |map| {
                                                                     if check_ip(a,b,c,d, map) {
                                                                         priority = 1;
-                                                                        println("higher priority!");
+                                                                        println("local request!");
                                                                     }
                                                                 }
                                                             },
@@ -163,6 +169,7 @@ fn main() {
                             _    => fail!()
                         };
                     }
+                    
                     let msg: sched_msg = sched_msg{stream: stream, filepath: file_path.clone(), priority: priority};
                     child_chan.send(msg);
                     
