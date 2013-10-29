@@ -18,16 +18,14 @@ use std::rt::io::*;
 use std::rt::io::net::ip::{SocketAddr, Ipv4Addr};
 use std::io::println;
 use std::cell::Cell;
-use std::{os, str, io, run, vec, hashmap, task};
+use std::{os, str, io, run, hashmap, task};
 use extra::arc;
 use extra::priority_queue::PriorityQueue;
 use std::comm::*;
 use std::cast;
-use extra::comm;
 use extra::comm::DuplexStream;
 use std::hashmap::HashSet;
 use std::path::Path;
-use extra::ringbuf::RingBuf;
 use extra::sort;
 
 static PORT:    int = 4414;
@@ -108,7 +106,7 @@ fn main() {
                                                 for item in sort_access.iter() {
                                                     if file_info.size > (item.size*item.num_access as i64) {
                                                         match (*ac).pop(&item.filepath.to_str()) {
-                                                            Some(thing)    =>  { (*ac).swap(file_info.filepath.to_str(), data.clone()); break;}
+                                                            Some(_)    =>  { (*ac).swap(file_info.filepath.to_str(), data.clone()); break;}
                                                             None           =>  { }
                                                         }
                                                     }
@@ -293,12 +291,8 @@ fn execFile(file_data: sched_msg) {
     let mut file_data = file_data;
     match io::file_reader(file_data.filepath) {
         Ok(rd)      =>  {   let closer = ~['\"',' ', '-','-','>'];
-                            let bracket = '<' as u8;
                             while !rd.eof() {
                             let rd_byte = rd.read_byte() as u8;
-                            if rd_byte == 0xFF {
-                                break;
-                            }
 
                             match rd_byte {
                                 0x3c =>  { let mut open: ~[u8] = ~[0,0,0,0,0,0,0,0,0,0,0,0,0,0];
@@ -330,7 +324,10 @@ fn execFile(file_data: sched_msg) {
                                                           file_data.stream.write(result.as_bytes());
                                                           }  
                                                         },
-                                _                   =>  { file_data.stream.write(&[rd_byte]); }
+                                _                   =>  { if rd_byte != 0xFF {
+                                                                file_data.stream.write(&[rd_byte]); 
+                                                          }
+                                                        }
                             }
                           }
                           port.send(~"end");
@@ -387,8 +384,8 @@ fn writeFile(tf: &mut sched_msg) ->  ~str {
     match io::file_reader(tf.filepath) {
         Ok(rd)      =>  { while !rd.eof() {
                             let rd_byte = rd.read_byte() as u8;
-                            tf.stream.write(&[rd_byte]);
                             if rd_byte != 0xFF {
+                                tf.stream.write(&[rd_byte]);
                                 file.push(rd_byte);
                             }
                           }
