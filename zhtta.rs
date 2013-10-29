@@ -27,10 +27,18 @@ use extra::comm;
 use extra::comm::DuplexStream;
 use std::hashmap::HashSet;
 use std::path::Path;
+use extra::ringbuf::RingBuf;
+use extra::sort;
 
 static PORT:    int = 4414;
 static IP: &'static str = "127.0.0.1";
 static mut visitor_count: uint = 0;
+
+struct access_t {
+    filepath: std::path::PosixPath,
+    size: uint,
+    num_access: uint
+}
 
 struct sched_msg {
     stream: Option<std::rt::io::net::tcp::TcpStream>,
@@ -51,9 +59,16 @@ fn main() {
     let add_vec = shared_req_heap.clone();
     let take_vec = shared_req_heap.clone();
 
-    //let cache: ~hashmap::HashMap<~std::path::PosixPath, ~str> = hashmap::HashMap<~std::path::PosixPath, ~str>::new();
-    //let shared_cache = arc::RWArc::new(cache);
-    
+    let cache: hashmap::HashMap<~str, ~str> = hashmap::HashMap::new();
+    let shared_cache = arc::RWArc::new(cache);
+    let add_cache = shared_cache.clone();
+    let check_cache = shared_cache.clone();
+
+    let accesses: ~[access_t] = ~[];
+    let shared_accesses = arc::RWArc::new(accesses);
+    let exist_accesses = shared_accesses.clone();
+    let new_accesses = shared_accesses.clone();
+
     let (port, chan) = stream();
     let chan = SharedChan::new(chan);
     
@@ -67,30 +82,48 @@ fn main() {
         do spawn {
             loop {
                 let mut tf: sched_msg = sm_port.recv(); // wait for the dequeued request to handle
-                match io::read_whole_file(tf.filepath) { // killed if file size is larger than memory size.
+                println(fmt!("begin serving file [%?]", tf.filepath.to_str()));
+                // A web server should always reply a HTTP header for any legal HTTP request.
+                tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n".as_bytes());
+                match do check_cache.read |cc| { (*cc).find_copy(&tf.filepath.to_str()) } {
+                    None        =>  { let data = writeFile(tf); 
+                                      do new_accesses.write |na| {
+                                            if (*na).len() > 20 {
+                                                (*na).pop_opt();
+                                            }
 
+                                            let file_info = access_t{filepath: tf.filepath, size: tf.filepath.stat().st_size, num_access: 1};
+                                            (*na).push(file_info);
+                                            do add_cache.write |ac| {
+                                                let sort_access = sort::merge_sort(na, |it1, it2| { (it1.size*it1.num_access) <= (it2.size*it2.num_access)});
+                                                for item in sort_access.iter() {
+                                                    if file_info.size > (item.size*item.num_access) {
+                                                        match (*ac).pop(&item.filepath.to_str()) {
+                                                            Some    =>  { (*ac).swap(file_info.filepath.to_str(), data); break;}
+                                                            None    =>  { }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                      }
+                                  }
 
-                    Ok(file_data) => {
-                        println(fmt!("begin serving file [%?]", tf.filepath));
-                        // A web server should always reply a HTTP header for any legal HTTP request.
-                        tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n".as_bytes());
-                         // Check if execute bit is set
-                        if tf.filepath.get_mode().unwrap() % 2 == 1 {
-                            println(fmt!("Processing dynamic file [%?]", tf.filepath));
-                            let dyn_file_data = execFile(str::from_utf8(file_data));
-                            tf.stream.write(dyn_file_data.as_bytes());
-                        } 
-                        //No caching of dynamically generated files
-                        else {
-                           // if 
-                            tf.stream.write(file_data);
-                        }
-                        println(fmt!("finish file [%?]", tf.filepath));
-                    }
-                    Err(err) => {
-                        println(err);
-                    }
+                    Some(ct)    =>  { tf.stream.write(ct.as_bytes());
+                                      do exist_accesses.write |ea| { 
+                                            for i in range((*ea).len()) {
+                                                let mut item = (*ea)[i];
+                                                if item.filepath == tf.filepath {
+                                                    item.num_access += 1;
+                                                    item = item.clone();
+                                                    (*ea).remove(i);
+                                                    (*ea).push(item);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
                 }
+                println(fmt!("finish file [%?]", tf.filepath.to_str()));
             }
         }
         
@@ -309,6 +342,24 @@ fn do_gash(chan: &DuplexStream<~str, ~str>) {
         chan.send(result.clone());
     }
     gash.destroy();
+}
+
+fn writeFile(tf: sched_msg) ->  ~str {
+    match io::read_whole_file(tf.filepath) { // killed if file size is larger than memory size.
+                                        Ok(file_data) => {  // Check if execute bit is set
+                                                            if tf.filepath.get_mode().unwrap() % 2 == 1 {
+                                                                println(fmt!("Processing dynamic file [%?]", tf.filepath.to_str()));
+                                                                let dyn_file_data = execFile(str::from_utf8(file_data));
+                                                                tf.stream.write(dyn_file_data.as_bytes());
+                                                            } 
+                                                            //No caching of dynamically generated files
+                                                            else {
+                                                                tf.stream.write(file_data);
+                                                            }
+                                                            
+                                                          }
+                                        Err(err) => { println(err); }
+                                    }
 }
 
 
