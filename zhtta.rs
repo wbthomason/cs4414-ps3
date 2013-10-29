@@ -83,6 +83,7 @@ fn main() {
         do spawn {
             loop {
                 let mut tf: sched_msg = sm_port.recv(); // wait for the dequeued request to handle
+                let fpath = tf.filepath.clone();
                 println(fmt!("begin serving file [%?]", tf.filepath.to_str()));
                 // A web server should always reply a HTTP header for any legal HTTP request.
                 tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n".as_bytes());
@@ -92,15 +93,14 @@ fn main() {
                                             // No cache for dynamically-generated files.
                                             loop;
                                       }
-
-                                      let data = writeFile(tf); 
+                                      let data = writeFile(&mut tf); 
                                       do new_accesses.write |na| {
                                             if (*na).len() > 20 {
                                                 (*na).pop_opt();
                                             }
 
-                                            let file_info = access_t{filepath: tf.filepath, size: tf.filepath.stat().unwrap().st_size, num_access: 1};
-                                            (*na).push(file_info);
+                                            let file_info = access_t{filepath: fpath.clone(), size: fpath.stat().unwrap().st_size, num_access: 1};
+                                            (*na).push(file_info.clone());
                                             do add_cache.write |ac| {
                                                 let sort_access = sort::merge_sort(*na, |it1: &access_t, it2: &access_t| { 
                                                                                         (it1.size*it1.num_access as i64) <= (it2.size*it2.num_access as i64)
@@ -108,7 +108,7 @@ fn main() {
                                                 for item in sort_access.iter() {
                                                     if file_info.size > (item.size*item.num_access as i64) {
                                                         match (*ac).pop(&item.filepath.to_str()) {
-                                                            Some(thing)    =>  { (*ac).swap(file_info.filepath.to_str(), data); break;}
+                                                            Some(thing)    =>  { (*ac).swap(file_info.filepath.to_str(), data.clone()); break;}
                                                             None           =>  { }
                                                         }
                                                     }
@@ -120,10 +120,9 @@ fn main() {
                     Some(ct)    =>  { tf.stream.write(ct.as_bytes());
                                       do exist_accesses.write |ea| { 
                                             for i in range(0, (*ea).len()) {
-                                                let mut item = (*ea)[i];
+                                                let mut item = (*ea)[i].clone();
                                                 if item.filepath == tf.filepath {
                                                     item.num_access += 1;
-                                                    item = item.clone();
                                                     (*ea).remove(i);
                                                     (*ea).push(item);
                                                     break;
@@ -132,7 +131,7 @@ fn main() {
                                         }
                                     }
                 }
-                println(fmt!("finish file [%?]", tf.filepath.to_str()));
+                println(fmt!("finish file [%?]", fpath.to_str()));
             }
         }
         
@@ -287,46 +286,54 @@ fn check_ip(a: u8, b: u8, c: u8, d: u8, map: &HashSet<u32>) -> bool {
 
 
 fn execFile(file_data: sched_msg) {
-    let index = 0;
-    let closes: ~[(uint, uint)] = file_data.matches_index_iter("\" -->").collect();
     let (port, chan) = DuplexStream();
     do task::spawn_supervised {
         do_gash(&chan)
     }
-    
-    let mut i = 0;
-    let mut prev = 0;
-    let mut result = ~"";
-    for (begin, end) in  file_data.matches_index_iter("<!--#exec cmd=\"") {
-        if i >= closes.len() {
-            break;
-        }
-
-        let (close, close_end) = closes[i];
-        let cmd: ~str = file_data.slice(end, close).to_owned();
-        port.send(cmd);
-        result.push_str(file_data.slice(prev, begin));
-        result.push_str(port.recv());
-        prev = close_end+1;
-        i += 1;
-    }
-
-    result.push_str(file_data.slice_from(prev));
-    port.send(~"end");
-    result
+    let mut file_data = file_data;
     match io::file_reader(file_data.filepath) {
-        Ok(rd)      =>  { while !rd.eof() {
-                            let rd_byte = rd.read_byte();
+        Ok(rd)      =>  {   let closer = ~['\"',' ', '-','-','>'];
+                            let bracket = '<' as u8;
+                            while !rd.eof() {
+                            let rd_byte = rd.read_byte() as u8;
+                            if rd_byte == 0xFF {
+                                break;
+                            }
+
                             match rd_byte {
-                                '<' as u8   =>  { let open: ~[u8] = ~[0,0,0,0,0,0,0,0,0,0,0,0,0,0];
-                                                  rd.read(open, 14);
-                                                  if str::from_utf8(open) == ~"!--#exec cmd=\"" {
-                                                    
-                                                  }  
-                                                },
-                                _           =>  { file_data.stream.write(&[rd_byte]); }
+                                0x3c =>  { let mut open: ~[u8] = ~[0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+                                                          rd.read(open, 14);
+                                                          if str::from_utf8(open) == ~"!--#exec cmd=\"" {
+                                                                let mut cmd: ~[u8] = ~[];
+                                                                let mut cmd_byte: u8;
+                                                                let mut i = 0;
+                                                                loop {
+                                                                    cmd_byte = rd.read_byte() as u8;
+                                                                    if cmd_byte == closer[i] as u8 {
+                                                                        if i == closer.len() - 1 {
+                                                                            break;
+                                                                        }
+
+                                                                        i += 1;
+                                                                    }
+                                                                    else {
+                                                                        i = 0;
+                                                                    }
+
+                                                                    if cmd_byte != 0xFF {
+                                                                        cmd.push(cmd_byte);
+                                                                    }
+                                                                }
+
+                                                          port.send(str::from_utf8(cmd.slice_to(cmd.len() - 4)));
+                                                          let result = port.recv();    
+                                                          file_data.stream.write(result.as_bytes());
+                                                          }  
+                                                        },
+                                _                   =>  { file_data.stream.write(&[rd_byte]); }
                             }
                           }
+                          port.send(~"end");
                         }
         Err(err)    =>  { println(err); }
     }
@@ -374,14 +381,16 @@ fn do_gash(chan: &DuplexStream<~str, ~str>) {
     gash.destroy();
 }
 
-fn writeFile(tf: sched_msg) ->  ~str {
-    let mut file: ~[u8];
+fn writeFile(tf: &mut sched_msg) ->  ~str {
+    let mut file: ~[u8] = ~[];
     let mut result: ~str;
     match io::file_reader(tf.filepath) {
         Ok(rd)      =>  { while !rd.eof() {
                             let rd_byte = rd.read_byte() as u8;
                             tf.stream.write(&[rd_byte]);
-                            file.push(rd_byte);
+                            if rd_byte != 0xFF {
+                                file.push(rd_byte);
+                            }
                           }
                             result = str::from_utf8(file);
                         }
