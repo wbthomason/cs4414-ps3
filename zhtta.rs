@@ -15,14 +15,18 @@
 extern mod extra;
 
 use std::rt::io::*;
-use std::rt::io::net::ip::SocketAddr;
+use std::rt::io::net::ip::{SocketAddr, Ipv4Addr};
 use std::io::println;
 use std::cell::Cell;
 use std::{os, str, io, run, vec, hashmap, task};
 use extra::arc;
+use extra::priority_queue::PriorityQueue;
 use std::comm::*;
+use std::cast;
 use extra::comm;
 use extra::comm::DuplexStream;
+use std::hashmap::HashSet;
+use std::path::Path;
 
 static PORT:    int = 4414;
 static IP: &'static str = "127.0.0.1";
@@ -30,14 +34,22 @@ static mut visitor_count: uint = 0;
 
 struct sched_msg {
     stream: Option<std::rt::io::net::tcp::TcpStream>,
-    filepath: ~std::path::PosixPath
+    filepath: ~std::path::PosixPath,
+    priority: uint
 }
 
+impl std::cmp::Ord for sched_msg {
+    fn lt(&self, other: &sched_msg) -> bool {
+        return self.priority > other.priority;
+    }
+}
+
+
 fn main() {
-    let req_vec: ~[sched_msg] = ~[];
-    let shared_req_vec = arc::RWArc::new(req_vec);
-    let add_vec = shared_req_vec.clone();
-    let take_vec = shared_req_vec.clone();
+    let req_heap: PriorityQueue<sched_msg> = PriorityQueue::new();
+    let shared_req_heap = arc::RWArc::new(req_heap);
+    let add_vec = shared_req_heap.clone();
+    let take_vec = shared_req_heap.clone();
 
     //let cache: ~hashmap::HashMap<~std::path::PosixPath, ~str> = hashmap::HashMap<~std::path::PosixPath, ~str>::new();
     //let shared_cache = arc::RWArc::new(cache);
@@ -49,12 +61,15 @@ fn main() {
     // FIFO
     do spawn {
         let (sm_port, sm_chan) = stream();
+
         
         // a task for sending responses.
         do spawn {
             loop {
                 let mut tf: sched_msg = sm_port.recv(); // wait for the dequeued request to handle
                 match io::read_whole_file(tf.filepath) { // killed if file size is larger than memory size.
+
+
                     Ok(file_data) => {
                         println(fmt!("begin serving file [%?]", tf.filepath));
                         // A web server should always reply a HTTP header for any legal HTTP request.
@@ -84,8 +99,7 @@ fn main() {
             do take_vec.write |vec| {
                 if ((*vec).len() > 0) {
                     // LIFO didn't make sense in service scheduling, so we modify it as FIFO by using shift_opt() rather than pop().
-                    let tf_opt: Option<sched_msg> = (*vec).shift_opt();
-                    let tf = tf_opt.unwrap();
+                    let tf: sched_msg = (*vec).pop();
                     println(fmt!("shift from queue, size: %ud", (*vec).len()));
                     sm_chan.send(tf); // send the request to send-response-task to serve.
                 }
@@ -93,27 +107,43 @@ fn main() {
         }
     }
 
+    // IP addresses to give higher priority
+    let mut ip_vals: HashSet<u32> = HashSet::with_capacity(9000);
+    ip_vals.insert((192 as u32 << 24) + (168 as u32 << 16));
+    ip_vals.insert((127 as u32 << 24) + (143 as u32 << 16));
+    ip_vals.insert((137 as u32 << 24) + (54 as u32 << 16));
+    ip_vals.insert(0);
+    let shared_ip_map = arc::RWArc::new(ip_vals);
+
+    let shared_count = arc::RWArc::new(0);
+
     let ip = match FromStr::from_str(IP) { Some(ip) => ip, 
                                            None => { println(fmt!("Error: Invalid IP address <%s>", IP));
                                                      return;},
                                          };
+                                         
                                          
     let socket = net::tcp::TcpListener::bind(SocketAddr {ip: ip, port: PORT as u16});
     
     println(fmt!("Listening on %s:%d ...", ip.to_str(), PORT));
     let mut acceptor = socket.listen().unwrap();
     
+
     for stream in acceptor.incoming() {
         let stream = Cell::new(stream);
+
+        let incr_count = shared_count.clone();
         
         // Start a new task to handle the each connection
         let child_chan = chan.clone();
+        let shared_ip_map = shared_ip_map.clone();
         let child_add_vec = add_vec.clone();
+
         do spawn {
-            unsafe {
-                visitor_count += 1;
+            do incr_count.write |count| {
+                *count = *count + 1;
             }
-            
+             
             let mut stream = stream.take();
             let mut buf = [0, ..500];
             stream.read(buf);
@@ -123,8 +153,13 @@ fn main() {
             if req_group.len() > 2 {
                 let path = req_group[1];
                 println(fmt!("Request for path: \n%?", path));
-                
-                let file_path = ~os::getcwd().push(path.replace("/../", ""));
+                // More better path security!
+                let unclean_path = os::getcwd().push(Path(path).to_str()).to_str();
+                let mut file_path = ~os::getcwd();
+                // paths are always normalized so a/b/../c becomes a/c
+                if unclean_path.starts_with(file_path.to_str()) {
+                    file_path = ~file_path.push(path);
+                }
                 if !os::path_exists(file_path) || os::path_is_dir(file_path) {
                     println(fmt!("Request received:\n%s", request_str));
                     let response: ~str = fmt!(
@@ -137,13 +172,37 @@ fn main() {
                          <body>
                          <h1>Greetings, Krusty!</h1>
                          <h2>Visitor count: %u</h2>
-                         </body></html>\r\n", unsafe{visitor_count});
+                         </body></html>\r\n", incr_count.read(|c| { *c }));
 
                     stream.write(response.as_bytes());
                 }
                 else {
                     // Requests scheduling
-                    let msg: sched_msg = sched_msg{stream: stream, filepath: file_path.clone()};
+
+                    let mut priority = file_path.stat().unwrap().st_size as uint;
+                    unsafe {
+                        match stream {
+                            Some(ref s) => { 
+                                    let stream = cast::transmute_mut(s);
+                                    let pn = stream.peer_name().unwrap();
+                                    println(fmt!("Peer is: %?", pn));
+                                    match pn.ip {
+                                        Ipv4Addr(a, b, c, d) => {   
+                                                                // Since we are sharing the ip_map it must be read
+                                                                do shared_ip_map.read |map| {
+                                                                    if check_ip(a,b,c,d, map) {
+                                                                        priority = 1;
+                                                                        println("local request!");
+                                                                    }
+                                                                }
+                                                            },
+                                        _                    =>  fail!()
+                                    }
+                            },
+                            _    => fail!()
+                        };
+                    }
+                    let msg: sched_msg = sched_msg{stream: stream, filepath: file_path.clone(), priority: priority};
                     let (sm_port, sm_chan) = std::comm::stream();
                     sm_chan.send(msg);
                     
@@ -160,6 +219,30 @@ fn main() {
         }
     }
 }
+
+
+// Looks up an ip prefix in the hashset by trying each octet
+fn check_ip(a: u8, b: u8, c: u8, d: u8, map: &HashSet<u32>) -> bool {
+    let mut mut_ip = a as u32 << 24;  
+    if map.contains(&mut_ip) {
+        return true;
+    }
+    mut_ip += (b as u32 << 16);
+    if map.contains(&mut_ip) {
+        return true;
+    }
+    mut_ip += (c as u32 << 8);
+    if map.contains(&mut_ip) {
+        return true;
+    }
+    mut_ip += (d as u32);
+    if map.contains(&mut_ip) {
+        return true;
+    }
+    false
+}
+
+
 
 pub fn execFile(file_data: &str) -> ~str {
     let index = 0;
@@ -227,3 +310,5 @@ fn do_gash(chan: &DuplexStream<~str, ~str>) {
     }
     gash.destroy();
 }
+
+
