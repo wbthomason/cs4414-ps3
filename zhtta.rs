@@ -286,7 +286,7 @@ fn check_ip(a: u8, b: u8, c: u8, d: u8, map: &HashSet<u32>) -> bool {
 
 
 
-pub fn execFile(file_data: sched_msg) -> ~str {
+fn execFile(file_data: sched_msg) {
     let index = 0;
     let closes: ~[(uint, uint)] = file_data.matches_index_iter("\" -->").collect();
     let (port, chan) = DuplexStream();
@@ -314,6 +314,23 @@ pub fn execFile(file_data: sched_msg) -> ~str {
     result.push_str(file_data.slice_from(prev));
     port.send(~"end");
     result
+    match io::file_reader(file_data.filepath) {
+        Ok(rd)      =>  { while !rd.eof() {
+                            let rd_byte = rd.read_byte();
+                            match rd_byte {
+                                '<' as u8   =>  { let open: ~[u8] = ~[0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+                                                  rd.read(open, 14);
+                                                  if str::from_utf8(open) == ~"!--#exec cmd=\"" {
+                                                    
+                                                  }  
+                                                },
+                                _           =>  { file_data.stream.write(&[rd_byte]); }
+                            }
+                          }
+                        }
+        Err(err)    =>  { println(err); }
+    }
+
 }
 
 fn do_gash(chan: &DuplexStream<~str, ~str>) {
