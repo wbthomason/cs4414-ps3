@@ -68,7 +68,7 @@ fn main() {
                         //No caching of dynamically generated files
                         else {
                            // if 
-                            //tf.stream.write(file_data);
+                            tf.stream.write(file_data);
                         }
                         println(fmt!("finish file [%?]", tf.filepath));
                     }
