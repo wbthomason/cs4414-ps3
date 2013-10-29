@@ -24,8 +24,8 @@ use extra::priority_queue::PriorityQueue;
 use std::comm::*;
 use std::cast;
 use extra::comm::DuplexStream;
-use std::hashmap::HashSet;
 use std::path::Path;
+use std::num;
 use extra::sort;
 
 static PORT:  int = 4414;
@@ -51,8 +51,13 @@ impl std::cmp::Ord for sched_msg {
     }
 }
 
+struct IpRange {
+    start_addr: u32,
+    end_addr: u32
+}
 
 fn main() {
+
     let req_heap: PriorityQueue<sched_msg> = PriorityQueue::new();
     let shared_req_heap = arc::RWArc::new(req_heap);
     let add_vec = shared_req_heap.clone();
@@ -146,13 +151,21 @@ fn main() {
         }
     }
 
-    // IP addresses to give higher priority
-    let mut ip_vals: HashSet<u32> = HashSet::with_capacity(9000);
-    ip_vals.insert((192 as u32 << 24) + (168 as u32 << 16));
-    ip_vals.insert((127 as u32 << 24) + (143 as u32 << 16));
-    ip_vals.insert((137 as u32 << 24) + (54 as u32 << 16));
-    ip_vals.insert(0);
-    let shared_ip_map = arc::RWArc::new(ip_vals);
+    // turns file into list of strings for each line
+    let iplist: ~str = io::read_whole_file_str(&Path("iplist.txt")).unwrap();
+    let iplist: ~[~[u32]] = iplist.line_iter().map(|x| { 
+                                                            let y: ~[&str] = x.split_iter(' ').collect();
+                                                            let start: u32 = num::from_str_radix(y[0], 10).unwrap();
+                                                            let fin: u32 = num::from_str_radix(y[1], 10).unwrap();
+                                                            ~[start, fin]
+                                                         }).collect();
+    let iplist = sort::merge_sort(iplist, |x, y| {     
+                                                     x[0] <= y[0]
+                                                    });
+    
+    
+    //println(fmt!("Checking! %?", check_ip(1280123655, iplist)));
+    let shared_ip_map = arc::RWArc::new(iplist);
 
     let shared_count = arc::RWArc::new(0);
 
@@ -164,10 +177,9 @@ fn main() {
                                          
     let socket = net::tcp::TcpListener::bind(SocketAddr {ip: ip, port: PORT as u16});
     
-    println(fmt!("Listening on %s:%d ...", ip.to_str(), PORT));
     let mut acceptor = socket.listen().unwrap();
     
-
+    println(fmt!("Listening on %s:%d ...", ip.to_str(), PORT));
     for stream in acceptor.incoming() {
         let stream = Cell::new(stream);
 
@@ -229,7 +241,7 @@ fn main() {
                                         Ipv4Addr(a, b, c, d) => {   
                                                                 // Since we are sharing the ip_map it must be read
                                                                 do shared_ip_map.read |map| {
-                                                                    if check_ip(a,b,c,d, map) {
+                                                                    if fcheck_ip(a,b,c,d, *map) {
                                                                         priority = 1;
                                                                         println("local request!");
                                                                     }
@@ -260,25 +272,31 @@ fn main() {
 }
 
 
+fn fcheck_ip(a: u8, b: u8, c: u8, d: u8, iplist: &[~[u32]]) -> bool {
+    check_ip(a as u32 << 24 + b as u32 << 16 + c as u8 << 8 + d, iplist)
+}
+
 // Looks up an ip prefix in the hashset by trying each octet
-fn check_ip(a: u8, b: u8, c: u8, d: u8, map: &HashSet<u32>) -> bool {
-    let mut mut_ip = a as u32 << 24;  
-    if map.contains(&mut_ip) {
-        return true;
+fn check_ip(ip: u32, iplist: &[~[u32]]) -> bool {
+    let mut min = 0;
+    let mut max = iplist.len() - 1;
+    while max >= min {
+        let mid = (max - min)/2 + min;
+        let elem = &iplist[mid];
+        if ip >= elem[0] {
+            if ip <= elem[1] {
+                return true;
+            } else {
+                min = mid + 1;
+            }
+        } else { // ip < elem
+           if max == 0 { // because overflow thats why
+                return false; 
+           }
+           max = mid - 1;
+        }
     }
-    mut_ip += (b as u32 << 16);
-    if map.contains(&mut_ip) {
-        return true;
-    }
-    mut_ip += (c as u32 << 8);
-    if map.contains(&mut_ip) {
-        return true;
-    }
-    mut_ip += (d as u32);
-    if map.contains(&mut_ip) {
-        return true;
-    }
-    false
+    return false
 }
 
 
