@@ -34,9 +34,10 @@ static PORT:    int = 4414;
 static IP: &'static str = "127.0.0.1";
 static mut visitor_count: uint = 0;
 
+#[deriving(Clone)]
 struct access_t {
-    filepath: std::path::PosixPath,
-    size: uint,
+    filepath: ~std::path::PosixPath,
+    size: i64,
     num_access: uint
 }
 
@@ -86,21 +87,29 @@ fn main() {
                 // A web server should always reply a HTTP header for any legal HTTP request.
                 tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n".as_bytes());
                 match do check_cache.read |cc| { (*cc).find_copy(&tf.filepath.to_str()) } {
-                    None        =>  { let data = writeFile(tf); 
+                    None        =>  { if tf.filepath.get_mode().unwrap() % 2 == 1 {
+                                            execFile(tf);
+                                            // No cache for dynamically-generated files.
+                                            loop;
+                                      }
+
+                                      let data = writeFile(tf); 
                                       do new_accesses.write |na| {
                                             if (*na).len() > 20 {
                                                 (*na).pop_opt();
                                             }
 
-                                            let file_info = access_t{filepath: tf.filepath, size: tf.filepath.stat().st_size, num_access: 1};
+                                            let file_info = access_t{filepath: tf.filepath, size: tf.filepath.stat().unwrap().st_size, num_access: 1};
                                             (*na).push(file_info);
                                             do add_cache.write |ac| {
-                                                let sort_access = sort::merge_sort(na, |it1, it2| { (it1.size*it1.num_access) <= (it2.size*it2.num_access)});
+                                                let sort_access = sort::merge_sort(*na, |it1: &access_t, it2: &access_t| { 
+                                                                                        (it1.size*it1.num_access as i64) <= (it2.size*it2.num_access as i64)
+                                                                                        });
                                                 for item in sort_access.iter() {
-                                                    if file_info.size > (item.size*item.num_access) {
+                                                    if file_info.size > (item.size*item.num_access as i64) {
                                                         match (*ac).pop(&item.filepath.to_str()) {
-                                                            Some    =>  { (*ac).swap(file_info.filepath.to_str(), data); break;}
-                                                            None    =>  { }
+                                                            Some(thing)    =>  { (*ac).swap(file_info.filepath.to_str(), data); break;}
+                                                            None           =>  { }
                                                         }
                                                     }
                                                 }
@@ -110,7 +119,7 @@ fn main() {
 
                     Some(ct)    =>  { tf.stream.write(ct.as_bytes());
                                       do exist_accesses.write |ea| { 
-                                            for i in range((*ea).len()) {
+                                            for i in range(0, (*ea).len()) {
                                                 let mut item = (*ea)[i];
                                                 if item.filepath == tf.filepath {
                                                     item.num_access += 1;
@@ -174,7 +183,7 @@ fn main() {
 
         do spawn {
             do incr_count.write |count| {
-                *count = *count + 1;
+                *count += 1;
             }
              
             let mut stream = stream.take();
@@ -277,7 +286,7 @@ fn check_ip(a: u8, b: u8, c: u8, d: u8, map: &HashSet<u32>) -> bool {
 
 
 
-pub fn execFile(file_data: &str) -> ~str {
+pub fn execFile(file_data: sched_msg) -> ~str {
     let index = 0;
     let closes: ~[(uint, uint)] = file_data.matches_index_iter("\" -->").collect();
     let (port, chan) = DuplexStream();
@@ -301,6 +310,7 @@ pub fn execFile(file_data: &str) -> ~str {
         prev = close_end+1;
         i += 1;
     }
+
     result.push_str(file_data.slice_from(prev));
     port.send(~"end");
     result
@@ -326,6 +336,7 @@ fn do_gash(chan: &DuplexStream<~str, ~str>) {
         if cmd == ~"end" {
             break;
         }
+
         cmd.push_str("\n");
         res = ~[];
         gin.write(cmd.as_bytes());
@@ -337,29 +348,29 @@ fn do_gash(chan: &DuplexStream<~str, ~str>) {
 
             res.push(res_byte);
         }
+
         gout.read(prompt, 7);
         result = str::from_utf8(res);
         chan.send(result.clone());
     }
+
     gash.destroy();
 }
 
 fn writeFile(tf: sched_msg) ->  ~str {
-    match io::read_whole_file(tf.filepath) { // killed if file size is larger than memory size.
-                                        Ok(file_data) => {  // Check if execute bit is set
-                                                            if tf.filepath.get_mode().unwrap() % 2 == 1 {
-                                                                println(fmt!("Processing dynamic file [%?]", tf.filepath.to_str()));
-                                                                let dyn_file_data = execFile(str::from_utf8(file_data));
-                                                                tf.stream.write(dyn_file_data.as_bytes());
-                                                            } 
-                                                            //No caching of dynamically generated files
-                                                            else {
-                                                                tf.stream.write(file_data);
-                                                            }
-                                                            
-                                                          }
-                                        Err(err) => { println(err); }
-                                    }
+    let mut file: ~[u8];
+    let mut result: ~str;
+    match io::file_reader(tf.filepath) {
+        Ok(rd)      =>  { while !rd.eof() {
+                            let rd_byte = rd.read_byte() as u8;
+                            tf.stream.write(&[rd_byte]);
+                            file.push(rd_byte);
+                          }
+                            result = str::from_utf8(file);
+                        }
+        Err(err)    =>  { println(err); result = err; }
+    }
+    result
 }
 
 
