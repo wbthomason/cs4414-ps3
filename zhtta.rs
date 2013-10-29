@@ -28,7 +28,7 @@ use std::hashmap::HashSet;
 use std::path::Path;
 use extra::sort;
 
-static PORT:    int = 4414;
+static PORT:  int = 4414;
 static IP: &'static str = "127.0.0.1";
 static mut visitor_count: uint = 0;
 
