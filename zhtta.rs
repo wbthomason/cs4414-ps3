@@ -73,11 +73,11 @@ fn main() {
         _        => {},
     }   
     match map.pop(&~"ip").unwrap(){
-        Ip(x)  => {IP = x.to_owned();}
+        Ip(x)  => {IP = x;}
         _        => {},
     }   
     match map.pop(&~"whitelist").unwrap(){
-        Whitelist(x)  => {WHITELIST = x.to_owned();}
+        Whitelist(x)  => {WHITELIST = x;}
         _        => {},
     }   
     match map.pop(&~"valid_gash").unwrap(){
@@ -86,7 +86,7 @@ fn main() {
     }   
 
 // SHARED MEMORY 
-    let shared_valid_gash = arc::Arc::new(VALID_GASH);
+    let shared_gash_cmds = arc::Arc::new(VALID_GASH);
     let req_heap: PriorityQueue<sched_msg> = PriorityQueue::new();
     let shared_req_heap = arc::RWArc::new(req_heap);
     let add_vec = shared_req_heap.clone();
@@ -109,10 +109,10 @@ fn main() {
     // FIFO
     do spawn {
         let (sm_port, sm_chan) = stream();
-
         
         // a task for sending responses.
         do spawn {
+            let shared_gash_cmds = shared_gash_cmds.clone();
             loop {
                 let mut tf: sched_msg = sm_port.recv(); // wait for the dequeued request to handle
                 let fpath = tf.filepath.clone();
@@ -131,7 +131,10 @@ fn main() {
 
                 match do check_cache.read |cc| { (*cc).find_copy(&tf.filepath.to_str()) } {
                     None        =>  { if tf.filepath.get_mode().unwrap() % 2 == 1 {
-                                            execFile(tf);
+                                            // to pass in command whitelist we
+                                            // must deference the ARC
+                                            // surrounding it
+                                            execFile(tf, shared_gash_cmds.get().to_owned());
                                             // No cache for dynamically-generated files.
                                             loop;
                                       }
@@ -203,17 +206,13 @@ fn main() {
                                                     });
     
     
-    //println(fmt!("Checking! %?", check_ip(1280123655, iplist)));
     let shared_ip_map = arc::RWArc::new(iplist);
-
     let shared_count = arc::RWArc::new(0);
 
     let ip = match FromStr::from_str(IP) { Some(ip) => ip, 
                                            None => { println(fmt!("Error: Invalid IP address <%s>", IP));
                                                      return;},
                                          };
-                                         
-                                         
     let socket = net::tcp::TcpListener::bind(SocketAddr {ip: ip, port: PORT as u16});
     
     let mut acceptor = socket.listen().unwrap();
@@ -340,7 +339,7 @@ fn check_ip(ip: u32, iplist: &[~[u32]]) -> bool {
 
 
 
-fn execFile(file_data: sched_msg) {
+fn execFile(file_data: sched_msg, allowed_cmds: ~[~str]) {
     let (port, chan) = DuplexStream();
     do task::spawn_supervised {
         do_gash(&chan)
@@ -375,11 +374,19 @@ fn execFile(file_data: sched_msg) {
                                                                         cmd.push(cmd_byte);
                                                                     }
                                                                 }
-
-                                                          port.send(str::from_utf8(cmd.slice_to(cmd.len() - 4)));
-                                                          let result = port.recv();    
-                                                          file_data.stream.write(result.as_bytes());
-                                                          }  
+                                                          // Arbitrary CMD execution prevention that is not so good :)
+                                                          let whole_cmd: ~str = str::from_utf8(cmd.slice_to(cmd.len() - 4));
+                                                          let split: ~[&str] = whole_cmd.split_iter(' ').collect();
+                                                          for elem in allowed_cmds.iter() {
+                                                              let elem: &str = elem.clone();
+                                                              if elem == split[0] {
+                                                                  port.send(whole_cmd);
+                                                                  let result = port.recv();    
+                                                                  file_data.stream.write(result.as_bytes());
+                                                                  break;
+                                                            }
+                                                           }
+                                                          }   
                                                         },
                                 _                   =>  { if rd_byte != 0xFF {
                                                                 file_data.stream.write(&[rd_byte]); 
