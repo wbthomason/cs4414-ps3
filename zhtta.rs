@@ -158,8 +158,8 @@ fn main() {
                         else {
                             //let data = writeFile(&mut tf); 
                             let data = match io::read_whole_file(fpath) {
-                                Ok(d)   =>  {tf.stream.write(d); d}
-                                Err(err)     =>  {err.as_bytes().to_owned()}    
+                                Ok(d)   =>  { tf.stream.write(d); d }
+                                Err(err)     =>  { err.as_bytes().to_owned() }    
                                 };
                             
                             let size = fpath.get_size().unwrap();
