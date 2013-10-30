@@ -70,14 +70,14 @@ fn main() {
     let (port, chan) = stream();
     let chan = SharedChan::new(chan);
 
-    /*do spawn {
+    do spawn {
         loop {
-            timer::sleep(7000);
+            timer::sleep(9000);
             do rem_cache.write |rc| {
                 (*rc).clear();
             }
         }
-    }*/
+    }
 
     // dequeue file requests, and send responses.
     // FIFO
@@ -123,7 +123,7 @@ fn main() {
                             if (*cc).len() < 10 {
                                 (*cc).push(access_t { filepath: fpath.clone(), size: size, data: data });
                             }
-                            else if (*cc).top().size < size { (*cc).push_pop(access_t { filepath: fpath.clone(), size: size, data: data }); }
+                            else if (*cc).top().size < size { (*cc).replace(access_t { filepath: fpath.clone(), size: size, data: data }); }
                         }
                     }
                 }
@@ -287,7 +287,6 @@ fn execFile(file_data: &mut sched_msg) {
     do task::spawn_supervised {
         do_gash(&chan)
     }
-    let mut file_data = file_data;
     match io::file_reader(file_data.filepath) {
         Ok(rd)      =>  {   let closer = ~['\"',' ', '-','-','>'];
                             while !rd.eof() {
