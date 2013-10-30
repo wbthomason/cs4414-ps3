@@ -18,7 +18,7 @@ use std::rt::io::*;
 use std::rt::io::net::ip::{SocketAddr, Ipv4Addr};
 use std::io::println;
 use std::cell::Cell;
-use std::{os, str, io, run, hashmap, task, vec};
+use std::{os, str, io, run, task, vec};
 use extra::arc;
 use extra::priority_queue::PriorityQueue;
 use std::comm::*;
@@ -33,8 +33,8 @@ static mut visitor_count: uint = 0;
 #[deriving(Clone)]
 struct access_t {
     filepath: ~std::path::PosixPath,
-    size: i64,
-    num_access: uint
+    size: i64, 
+    data: ~[u8]
 }
 
 struct sched_msg {
@@ -49,6 +49,11 @@ impl std::cmp::Ord for sched_msg {
     }
 }
 
+impl std::cmp::Ord for access_t {
+    fn lt(&self, other: &access_t)  ->  bool {
+        self.size > other.size
+    }
+}
 #[deriving(Eq, Encodable, Decodable)]
 enum Config {
     Port(int),
@@ -92,19 +97,23 @@ fn main() {
     let add_vec = shared_req_heap.clone();
     let take_vec = shared_req_heap.clone();
 
-    let cache: hashmap::HashMap<~str, ~[u8]> = hashmap::HashMap::new();
+    let cache: PriorityQueue<access_t> = PriorityQueue::new();
     let shared_cache = arc::RWArc::new(cache);
-    let add_cache = shared_cache.clone();
+    let rem_cache = shared_cache.clone();
     let check_cache = shared_cache.clone();
-
-    let accesses: ~[access_t] = ~[];
-    let shared_accesses = arc::RWArc::new(accesses);
-    let exist_accesses = shared_accesses.clone();
-    let new_accesses = shared_accesses.clone();
 
     let (port, chan) = stream();
     let chan = SharedChan::new(chan);
-    
+
+    do spawn {
+        loop {
+            timer::sleep(9000);
+            do rem_cache.write |rc| {
+                (*rc).clear();
+            }
+        }
+    }
+
     // dequeue file requests, and send responses.
     // FIFO
     do spawn {
@@ -129,53 +138,39 @@ fn main() {
                     _       =>  { tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream; charset=UTF-8\r\n\r\n".as_bytes()); }
                 }
 
-                match do check_cache.read |cc| { (*cc).find_copy(&tf.filepath.to_str()) } {
-                    None        =>  { if tf.filepath.get_mode().unwrap() % 2 == 1 {
-                                            // to pass in command whitelist we
-                                            // must deference the ARC
-                                            // surrounding it
-                                            execFile(tf, shared_gash_cmds.get().to_owned());
-                                            // No cache for dynamically-generated files.
-                                            loop;
-                                      }
-                                      let data = writeFile(&mut tf); 
-                                      do new_accesses.write |na| {
-                                            if (*na).len() > 20 {
-                                                (*na).pop_opt();
-                                            }
-
-                                            let file_info = access_t{filepath: fpath.clone(), size: fpath.get_size().unwrap(), num_access: 1};
-                                            (*na).push(file_info.clone());
-                                            do add_cache.write |ac| {
-                                                let sort_access = sort::merge_sort(*na, |it1: &access_t, it2: &access_t| { 
-                                                                                        (it1.size*it1.num_access as i64) <= (it2.size*it2.num_access as i64)
-                                                                                        });
-                                                for item in sort_access.iter() {
-                                                    if file_info.size > (item.size*item.num_access as i64) {
-                                                        match (*ac).pop(&item.filepath.to_str()) {
-                                                            Some(_)    =>  { (*ac).swap(file_info.filepath.to_str(), data.clone()); break;}
-                                                            None           =>  { }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                      }
-                                  }
-
-                    Some(ct)    =>  { tf.stream.write(ct);
-                                      do exist_accesses.write |ea| { 
-                                            for i in range(0, (*ea).len()) {
-                                                let mut item = (*ea)[i].clone();
-                                                if item.filepath == tf.filepath {
-                                                    item.num_access += 1;
-                                                    (*ea).remove(i);
-                                                    (*ea).push(item);
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
+                do check_cache.write |cc| {
+                    let mut cached = false;
+                    for elem in (*cc).iter() {
+                        if elem.filepath == fpath {
+                            tf.stream.write(elem.data);
+                            cached = true;
+                            break;
+                        }
+                    }
+                    if !cached {
+                        if tf.filepath.get_mode().unwrap() % 2 == 1 {
+                            // to pass in command whitelist we
+                            // must deference the ARC
+                            // surrounding it
+                            execFile(&mut tf, shared_gash_cmds.get().to_owned());
+                            // No cache for dynamically-generated files.
+                        }
+                        else {
+                            //let data = writeFile(&mut tf); 
+                            let data = match io::read_whole_file(fpath) {
+                                Ok(d)   =>  {tf.stream.write(d); d}
+                                Err(err)     =>  {err.as_bytes().to_owned()}    
+                                };
+                            
+                            let size = fpath.get_size().unwrap();
+                            if (*cc).len() < 10 {
+                                (*cc).push(access_t { filepath: fpath.clone(), size: size, data: data });
+                            }
+                            else if (*cc).top().size < size { (*cc).replace(access_t { filepath: fpath.clone(), size: size, data: data }); }
+                        }
+                    }
                 }
+
                 println(fmt!("finish file [%?]", fpath.to_str()));
             }
         }
@@ -338,13 +333,11 @@ fn check_ip(ip: u32, iplist: &[~[u32]]) -> bool {
 }
 
 
-
-fn execFile(file_data: sched_msg, allowed_cmds: ~[~str]) {
+fn execFile(file_data: &mut sched_msg, allowed_cmds: ~[~str]) {
     let (port, chan) = DuplexStream();
     do task::spawn_supervised {
         do_gash(&chan)
     }
-    let mut file_data = file_data;
     match io::file_reader(file_data.filepath) {
         Ok(rd)      =>  {   let closer = ~['\"',' ', '-','-','>'];
                             while !rd.eof() {
@@ -444,18 +437,22 @@ fn do_gash(chan: &DuplexStream<~str, ~str>) {
 
 fn writeFile(tf: &mut sched_msg) ->  ~[u8] {
     let mut file: ~[u8] = ~[];
+    let mut writes = 0;
     match io::file_reader(tf.filepath) {
         Ok(rd)      =>  { while !rd.eof() {
-                            let mut buffer: ~[u8] = vec::with_capacity(2048u);
-                            unsafe { vec::raw::set_len(&mut buffer, 2048u); }
-                            let read = rd.read(buffer, 2048u);
+                            let mut buffer: ~[u8] = vec::with_capacity(5242880u);
+                            unsafe { vec::raw::set_len(&mut buffer, 5242880u); }
+                            let read = rd.read(buffer, 5242880u);
                             unsafe { vec::raw::set_len(&mut buffer, read); }
                             file.push_all(buffer);
-                            tf.stream.write(buffer);
-                            }
+                            //tf.stream.write(buffer);
+                            writes += 1;
+                          }
+                          println(fmt!("%d", writes));
                         }
         Err(err)    =>  { println(err); }
     }
+    tf.stream.write(file);
     file
 }
 
