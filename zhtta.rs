@@ -26,10 +26,8 @@ use std::cast;
 use extra::comm::DuplexStream;
 use std::path::Path;
 use std::num;
-use extra::{sort, json};
+use extra::{sort, json, serialize, treemap};
 
-static PORT:  int = 4414;
-static IP: &'static str = "127.0.0.1";
 static mut visitor_count: uint = 0;
 
 #[deriving(Clone)]
@@ -51,12 +49,44 @@ impl std::cmp::Ord for sched_msg {
     }
 }
 
+#[deriving(Eq, Encodable, Decodable)]
+enum Config {
+    Port(int),
+    Ip(~str),
+    Whitelist(~str),
+    Valid_gash(~[~str])
+}
+
 fn main() {
+    let mut PORT:  int = 4414;
+    let mut WHITELIST = ~"";
+    let mut IP: ~str = ~"127.0.0.1";
+    let mut VALID_GASH: ~[~str] = ~[];
+
+// JSON FILE PARSING FRIENDS!
     let s: ~str = io::read_whole_file_str(&Path("server.conf")).unwrap();
     let js: json::Json = json::from_str(s).unwrap();
-    println(fmt!("%?", js));
+    let mut decoder = json::Decoder(js);   
+    let mut map: treemap::TreeMap<~str,  Config> = serialize::Decodable::decode(&mut decoder);
+    match map.pop(&~"port").unwrap(){
+        Port(x)  => {PORT = x;}
+        _        => {},
+    }   
+    match map.pop(&~"ip").unwrap(){
+        Ip(x)  => {IP = x.to_owned();}
+        _        => {},
+    }   
+    match map.pop(&~"whitelist").unwrap(){
+        Whitelist(x)  => {WHITELIST = x.to_owned();}
+        _        => {},
+    }   
+    match map.pop(&~"valid_gash").unwrap(){
+        Valid_gash(x)  => {VALID_GASH = x;}
+        _        => {},
+    }   
 
-
+// SHARED MEMORY 
+    let shared_valid_gash = arc::Arc::new(VALID_GASH);
     let req_heap: PriorityQueue<sched_msg> = PriorityQueue::new();
     let shared_req_heap = arc::RWArc::new(req_heap);
     let add_vec = shared_req_heap.clone();
@@ -161,7 +191,7 @@ fn main() {
     }
 
     // turns file into list of strings for each line
-    let iplist: ~str = io::read_whole_file_str(&Path("iplist.txt")).unwrap();
+    let iplist: ~str = io::read_whole_file_str(&Path(WHITELIST)).unwrap();
     let iplist: ~[~[u32]] = iplist.line_iter().map(|x| { 
                                                             let y: ~[&str] = x.split_iter(' ').collect();
                                                             let start: u32 = num::from_str_radix(y[0], 10).unwrap();
