@@ -18,7 +18,7 @@ use std::rt::io::*;
 use std::rt::io::net::ip::{SocketAddr, Ipv4Addr};
 use std::io::println;
 use std::cell::Cell;
-use std::{os, str, io, run, hashmap, task};
+use std::{os, str, io, run, hashmap, task, vec};
 use extra::arc;
 use extra::priority_queue::PriorityQueue;
 use std::comm::*;
@@ -58,7 +58,7 @@ fn main() {
     let add_vec = shared_req_heap.clone();
     let take_vec = shared_req_heap.clone();
 
-    let cache: hashmap::HashMap<~str, ~str> = hashmap::HashMap::new();
+    let cache: hashmap::HashMap<~str, ~[u8]> = hashmap::HashMap::new();
     let shared_cache = arc::RWArc::new(cache);
     let add_cache = shared_cache.clone();
     let check_cache = shared_cache.clone();
@@ -84,7 +84,17 @@ fn main() {
                 let fpath = tf.filepath.clone();
                 println(fmt!("begin serving file [%?]", tf.filepath.to_str()));
                 // A web server should always reply a HTTP header for any legal HTTP request.
-                tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n".as_bytes());
+                let extension = fpath.components().last();
+                match extension.rfind('.') {
+                    Some(x) =>  { 
+                        match extension.slice_from(x+1) {
+                            "html"|"xhtml"|"txt"|"xml"  => { tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n".as_bytes()); }
+                            _                           => { tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream; charset=UTF-8\r\n\r\n".as_bytes()); }
+                        } 
+                    }
+                    _       =>  { tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream; charset=UTF-8\r\n\r\n".as_bytes()); }
+                }
+
                 match do check_cache.read |cc| { (*cc).find_copy(&tf.filepath.to_str()) } {
                     None        =>  { if tf.filepath.get_mode().unwrap() % 2 == 1 {
                                             execFile(tf);
@@ -97,7 +107,7 @@ fn main() {
                                                 (*na).pop_opt();
                                             }
 
-                                            let file_info = access_t{filepath: fpath.clone(), size: fpath.stat().unwrap().st_size, num_access: 1};
+                                            let file_info = access_t{filepath: fpath.clone(), size: fpath.get_size().unwrap(), num_access: 1};
                                             (*na).push(file_info.clone());
                                             do add_cache.write |ac| {
                                                 let sort_access = sort::merge_sort(*na, |it1: &access_t, it2: &access_t| { 
@@ -115,7 +125,7 @@ fn main() {
                                       }
                                   }
 
-                    Some(ct)    =>  { tf.stream.write(ct.as_bytes());
+                    Some(ct)    =>  { tf.stream.write(ct);
                                       do exist_accesses.write |ea| { 
                                             for i in range(0, (*ea).len()) {
                                                 let mut item = (*ea)[i].clone();
@@ -378,22 +388,21 @@ fn do_gash(chan: &DuplexStream<~str, ~str>) {
     gash.destroy();
 }
 
-fn writeFile(tf: &mut sched_msg) ->  ~str {
+fn writeFile(tf: &mut sched_msg) ->  ~[u8] {
     let mut file: ~[u8] = ~[];
-    let mut result: ~str;
     match io::file_reader(tf.filepath) {
         Ok(rd)      =>  { while !rd.eof() {
-                            let rd_byte = rd.read_byte() as u8;
-                            if rd_byte != 0xFF {
-                                tf.stream.write(&[rd_byte]);
-                                file.push(rd_byte);
+                            let mut buffer: ~[u8] = vec::with_capacity(2048u);
+                            unsafe { vec::raw::set_len(&mut buffer, 2048u); }
+                            let read = rd.read(buffer, 2048u);
+                            unsafe { vec::raw::set_len(&mut buffer, read); }
+                            file.push_all(buffer);
+                            tf.stream.write(buffer);
                             }
-                          }
-                            result = str::from_utf8(file);
                         }
-        Err(err)    =>  { println(err); result = err; }
+        Err(err)    =>  { println(err); }
     }
-    result
+    file
 }
 
 
