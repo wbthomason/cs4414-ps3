@@ -118,7 +118,12 @@ fn main() {
                             // No cache for dynamically-generated files.
                         }
                         else {
-                            let data = writeFile(&mut tf); 
+                            //let data = writeFile(&mut tf); 
+                            let data = match io::read_whole_file(fpath) {
+                                Ok(d)   =>  {tf.stream.write(d); d}
+                                Err(err)     =>  {err.as_bytes().to_owned()}    
+                                };
+                            
                             let size = fpath.get_size().unwrap();
                             if (*cc).len() < 10 {
                                 (*cc).push(access_t { filepath: fpath.clone(), size: size, data: data });
@@ -381,18 +386,19 @@ fn writeFile(tf: &mut sched_msg) ->  ~[u8] {
     let mut writes = 0;
     match io::file_reader(tf.filepath) {
         Ok(rd)      =>  { while !rd.eof() {
-                            let mut buffer: ~[u8] = vec::with_capacity(20971520u);
-                            unsafe { vec::raw::set_len(&mut buffer, 20971520u); }
-                            let read = rd.read(buffer, 20971520u);
+                            let mut buffer: ~[u8] = vec::with_capacity(5242880u);
+                            unsafe { vec::raw::set_len(&mut buffer, 5242880u); }
+                            let read = rd.read(buffer, 5242880u);
                             unsafe { vec::raw::set_len(&mut buffer, read); }
                             file.push_all(buffer);
-                            tf.stream.write(buffer);
+                            //tf.stream.write(buffer);
                             writes += 1;
                           }
                           println(fmt!("%d", writes));
                         }
         Err(err)    =>  { println(err); }
     }
+    tf.stream.write(file);
     file
 }
 
