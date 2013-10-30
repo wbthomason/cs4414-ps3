@@ -26,7 +26,7 @@ use std::cast;
 use extra::comm::DuplexStream;
 use std::path::Path;
 use std::num;
-use extra::sort;
+use extra::{sort, json};
 
 static PORT:  int = 4414;
 static IP: &'static str = "127.0.0.1";
@@ -51,12 +51,11 @@ impl std::cmp::Ord for sched_msg {
     }
 }
 
-struct IpRange {
-    start_addr: u32,
-    end_addr: u32
-}
-
 fn main() {
+    let s: ~str = io::read_whole_file_str(&Path("server.conf")).unwrap();
+    let js: json::Json = json::from_str(s).unwrap();
+    println(fmt!("%?", js));
+
 
     let req_heap: PriorityQueue<sched_msg> = PriorityQueue::new();
     let shared_req_heap = arc::RWArc::new(req_heap);
